@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Leaflet + Supabase PostGIS</title>
+
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+
+    <style>
+        * { box-sizing: border-box; }
+        body { padding: 0; margin: 0; font-family: sans-serif; }
+        html, body, #map { height: 100%; width: 100vw; }
+
+        /* ── Loading overlay ── */
+        #loading-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(255, 255, 255, 0.88);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 9999;
+            gap: 14px;
+            transition: opacity 0.4s;
+        }
+        #loading-overlay.hidden { opacity: 0; pointer-events: none; }
+
+        .spinner {
+            width: 48px;
+            height: 48px;
+            border: 5px solid #e0e0e0;
+            border-top-color: #0d6efd;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        #loading-overlay p { margin: 0; font-size: 15px; color: #444; }
+
+        /* ── Error toast ── */
+        #error-box {
+            display: none;
+            position: fixed;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #dc3545;
+            color: #fff;
+            padding: 12px 22px;
+            border-radius: 8px;
+            font-size: 14px;
+            z-index: 9999;
+            max-width: 90vw;
+            text-align: center;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+        }
+    </style>
+</head>
+<body>
+
+<div id="loading-overlay">
+    <div class="spinner"></div>
+    <p>Carregando municípios do Supabase…</p>
+</div>
+
+<div id="error-box"></div>
+
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
+<script>
+// ============================================================
+//  CONFIGURAÇÃO DO SUPABASE  ← altere se necessário
+// ============================================================
+const SUPABASE_URL = 'https://edkhpilpqsudwzkuxcno.supabase.co';
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVka2hwaWxwcXN1ZHd6a3V4Y25vIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg3NDk5MzIsImV4cCI6MjA5NDMyNTkzMn0.1OJyhqYXWPW_zejKgHLPUseKCpwNFqwIPg66hPAtJa4';
+
+const TABELA      = 'municipios'; // nome da tabela no Supabase
+const COLUNA_GEOM = 'geom';      // nome da coluna PostGIS
+
+// ============================================================
+//  MAPA BASE
+// ============================================================
+const center = [-7.213987593255963, -36.99096679687501];
+const zoom   = 9;
+const map    = L.map('map').setView(center, zoom);
+
+const osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '&copy; <a href="http://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+}).addTo(map);
+
+const googleStreets = L.tileLayer('http://{s}.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', {
+    maxZoom: 20,
+    subdomains: ['mt0','mt1','mt2','mt3']
+});
+
+// ============================================================
+//  ESTILO E POPUP  (iguais ao original)
+// ============================================================
+const stylePB = {
+    color:       '#ff7800',
+    weight:      1,
+    opacity:     1,
+    fillOpacity: 0.1
+};
+
+function onEachFeature(feature, layer) {
+    if (feature.properties) {
+        const p = feature.properties;
+        const popupContent = `
+            <div style="font-family: sans-serif; line-height: 1.5;">
+                <strong style="font-size: 1.1em;">${p.nome || 'Sem nome'}</strong><br>
+                <hr style="border:0; border-top:1px solid #ccc; margin:5px 0;">
+                <b>Código IBGE:</b> ${p.cod_ibge_m}<br>
+                <b>Microrregião:</b> ${p.microregiao}<br>
+                <b>Mesorregião:</b> ${p.mesoregiao}<br>
+                <hr style="border:0; border-top:1px solid #eee; margin:5px 0;">
+                <b>Pop. Urbana:</b> ${Number(p.populacao_urbana).toLocaleString('pt-BR')}<br>
+                <b>Pop. Rural:</b> ${Number(p.populacao_rural).toLocaleString('pt-BR')}<br>
+                <strong>Pop. Total:</strong> ${Number(p.populacao_total).toLocaleString('pt-BR')}
+            </div>
+        `;
+        layer.bindPopup(popupContent);
+    }
+}
+
+// ============================================================
+//  BUSCA OS DADOS NO SUPABASE E RENDERIZA NO LEAFLET
+// ============================================================
+async function carregarMunicipios() {
+    const loadingEl = document.getElementById('loading-overlay');
+    const errorEl   = document.getElementById('error-box');
+
+    try {
+        /*
+         * O PostgREST (usado pelo Supabase) serializa colunas
+         * geometry/geography PostGIS diretamente como objetos GeoJSON
+         * no corpo da resposta — não é necessário nenhuma conversão manual.
+         *
+         * O header "Range: 0-9999" aumenta o limite padrão de 1000 linhas.
+         * Ajuste o número final conforme o total de municípios da sua tabela.
+         */
+        const response = await fetch(
+            `${SUPABASE_URL}/rest/v1/${TABELA}?select=*`,
+            {
+                headers: {
+                    'apikey':        SUPABASE_KEY,
+                    'Authorization': `Bearer ${SUPABASE_KEY}`,
+                    'Accept':        'application/json',
+                    'Range':         '0-9999'
+                }
+            }
+        );
+
+        if (!response.ok) {
+            const txt = await response.text();
+            throw new Error(`HTTP ${response.status} — ${txt}`);
+        }
+
+        const rows = await response.json();
+
+        if (!rows || rows.length === 0) {
+            throw new Error(`Tabela "${TABELA}" retornou 0 registros. Verifique permissões e RLS.`);
+        }
+
+        /*
+         * Monta um FeatureCollection GeoJSON a partir do array de linhas.
+         * A coluna COLUNA_GEOM já vem como objeto GeoJSON do Supabase.
+         * As demais colunas viram properties do Feature.
+         */
+        const featureCollection = {
+            type: 'FeatureCollection',
+            features: rows.map(row => {
+                const { [COLUNA_GEOM]: geom, ...props } = row;
+                return {
+                    type:       'Feature',
+                    geometry:   geom,
+                    properties: props
+                };
+            })
+        };
+
+        // Cria a camada GeoJSON e adiciona ao mapa
+        const municipiosGeoJSON = L.geoJSON(featureCollection, {
+            style:         stylePB,
+            onEachFeature: onEachFeature
+        }).addTo(map);
+
+        // Controle de camadas
+        L.control.layers(
+            { 'OpenStreetMap': osm, 'Google Streets': googleStreets },
+            { 'Municípios': municipiosGeoJSON }
+        ).addTo(map);
+
+        // Esconde loading
+        loadingEl.classList.add('hidden');
+
+    } catch (err) {
+        console.error('[Supabase] Erro:', err);
+        loadingEl.classList.add('hidden');
+        errorEl.textContent = `⚠️ Erro ao carregar dados: ${err.message}`;
+        errorEl.style.display = 'block';
+        setTimeout(() => { errorEl.style.display = 'none'; }, 8000);
+    }
+}
+
+carregarMunicipios();
+</script>
+</body>
+</html>
