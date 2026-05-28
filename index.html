@@ -7,7 +7,8 @@
 
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
-
+    <link rel="stylesheet" href="http://maxcdn.bootstrapcdn.com/font-awesome/4.3.0/css/font-awesome.min.css"/>
+    <link rel="stylesheet" href="https://raw.githack.com/torfsen/leaflet.zoomhome/master/dist/leaflet.zoomhome.css"/>
     <style>
         * { box-sizing: border-box; }
         body { padding: 0; margin: 0; font-family: sans-serif; }
@@ -72,6 +73,8 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
     integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 
+<script src="https://raw.githack.com/torfsen/leaflet.zoomhome/master/dist//leaflet.zoomhome.min.js"></script>
+
 <script>
 // ============================================================
 //  CONFIGURAÇÃO DO SUPABASE  ← altere se necessário
@@ -87,7 +90,10 @@ const COLUNA_GEOM = 'geom';      // nome da coluna PostGIS
 // ============================================================
 const center = [-7.213987593255963, -36.99096679687501];
 const zoom   = 9;
-const map    = L.map('map').setView(center, zoom);
+const map    = L.map('map', {zoomControl: false}).setView(center, zoom);
+
+const zoomHome = L.Control.zoomHome();
+zoomHome.addTo(map);
 
 const osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19,
